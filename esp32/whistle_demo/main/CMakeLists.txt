@@ -8,10 +8,9 @@ if(WHISTLE_SELFTEST AND EXISTS "${ST}")
     set(ST_EMBED EMBED_FILES "selftest.raw")
 endif()
 
-idf_component_register(SRCS "main.c"
+idf_component_register(SRCS "main.c" "ui.c" "font_nunito_22.c" "font_nunito_30.c"
                        ${ST_EMBED}
-                       REQUIRES needle esp_driver_i2s esp_driver_rmt esp_driver_gpio
-                                esp_partition esp_timer)
+                       REQUIRES needle esp_driver_gpio esp_partition esp_timer)
 if(WHISTLE_SELFTEST AND EXISTS "${ST}")
     target_compile_definitions(${COMPONENT_LIB} PRIVATE HAVE_SELFTEST)
 endif()

@@ -23,3 +23,5 @@ CONFIG_ESP32S3_INSTRUCTION_CACHE_LINE_32B=y
 # This board is plugged in by its native USB port (see the README's Whistle
 # troubleshooting). The UART bridge default would block every printf.
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+# LVGL (the screen, ui.c) allocates with malloc, as Waveshare's 1.75C examples set it.
+CONFIG_LV_USE_CLIB_MALLOC=y
