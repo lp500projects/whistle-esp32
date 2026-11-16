@@ -25,6 +25,7 @@ LV_FONT_DECLARE(font_nunito_30);   /* so ñ, é, ü, ß, ł, ż all render */
 #define FH      80
 #define FLAG_Y  140                /* flag centre */
 #define FLAG_DX 100                /* screen centre to flag centre */
+#define SLEEP_MS 10000             /* screen off after this long with no touch or update */
 
 /* nd_whistle's language order: en de fr es it nl pl. Stripe weights run
  * along the stripe axis (Spain's yellow band is twice the red ones). */
@@ -102,6 +103,22 @@ static void on_swap(lv_event_t *e)
     draw_flag(1);
 }
 
+/* Touches reset LVGL's idle time, and so does every ui_status/ui_text, so
+ * BOOT and new results wake the screen too. */
+static void on_idle(lv_timer_t *t)
+{
+    static int asleep;
+    int        idle = lv_display_get_inactive_time(NULL) > SLEEP_MS;
+
+    (void)t;
+    if (idle == asleep)
+        return;
+    asleep = idle;
+    bsp_display_brightness_set(idle ? 0 : 100);
+    /* while dark, the top layer takes the waking tap so it can't change a flag */
+    lv_obj_set_clickable(lv_layer_top(), idle);
+}
+
 static lv_obj_t *label(lv_obj_t *p, const lv_font_t *font, uint32_t c)
 {
     lv_obj_t *l = lv_label_create(p);
@@ -169,6 +186,8 @@ void ui_init(void)
     lv_obj_set_width(s_text, 330);
     lv_label_set_long_mode(s_text, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(s_text, LV_TEXT_ALIGN_CENTER, 0);
+
+    lv_timer_create(on_idle, 100, NULL);
     bsp_display_unlock();
 }
 
@@ -176,6 +195,7 @@ void ui_status(const char *s)
 {
     bsp_display_lock(-1);
     lv_label_set_text(s_status, s);
+    lv_display_trigger_activity(lv_display_get_default());
     bsp_display_unlock();
 }
 
@@ -199,6 +219,7 @@ void ui_text(const char *s)
     n = strlen(s) + strlen(lv_label_get_text(s_heard));
     lv_obj_set_style_text_font(s_text, n > 60 ? &font_nunito_22 : &font_nunito_30, 0);
     lv_label_set_text(s_text, s);
+    lv_display_trigger_activity(lv_display_get_default());
     bsp_display_unlock();
 }
 
