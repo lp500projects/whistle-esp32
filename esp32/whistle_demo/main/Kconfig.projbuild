@@ -1,0 +1,18 @@
+# Set with `idf.py menuconfig`. The values land in sdkconfig, which is
+# gitignored, so credentials never reach the repo (never put them in
+# sdkconfig.defaults, which is committed).
+menu "Whistle translation"
+
+    config WHISTLE_WIFI_SSID
+        string "Wi-Fi SSID (2.4 GHz)"
+        default ""
+
+    config WHISTLE_WIFI_PASSWORD
+        string "Wi-Fi password"
+        default ""
+
+    config WHISTLE_DEEPL_KEY
+        string "DeepL API key (Free keys end in :fx)"
+        default ""
+
+endmenu

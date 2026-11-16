@@ -1,6 +1,7 @@
 /* Whistle on the Waveshare ESP32-S3-Touch-AMOLED-1.75C: hold BOOT, speak, and
  * the transcript appears on the screen (ui.c), decoded in the input language
- * picked there.
+ * picked there, with its translation into the output language from DeepL
+ * over Wi-Fi (net.c).
  *
  * Speech recognition runs entirely on the chip. The depth-4 Whistle model
  * (tools/whistle_strip.py, 14.5 MB) lives in the "model" partition, grown to
@@ -13,6 +14,7 @@
  * Out on serial, one line each:
  *   EVT ...     status, levels and per-phase timings
  *   TXT ...     the transcript
+ *   TRN ...     its translation
  */
 #include <math.h>
 #include <stdio.h>
@@ -31,6 +33,7 @@
 
 #include "nd_quant.h"
 #include "nd_whistle.h"
+#include "net.h"
 #include "ui.h"
 
 #define BUTTON_GPIO    0             /* BOOT; GPIO7 is a display line on the 1.75C */
@@ -157,8 +160,8 @@ static void transcribe(float *x, uint32_t n)
                                            "~matmul", "~mlp", "~attn", "~mhc" };
     uint32_t s0 = 0, s1 = n, T, ids[96], i;
     float    floor_rms = noise_floor(), peak = 0.0f, *enc;
-    int      nt;
-    char     text[512];
+    int      nt, to;
+    char     text[512], tr[1024], msg[160];
     int64_t  t0 = esp_timer_get_time(), t_enc, t_dec;
 
     for (i = 0; i < n; i++)
@@ -210,7 +213,26 @@ static void transcribe(float *x, uint32_t n)
         printf("EVT prof %-9s %8.0f ms\n", PN[i], nd_wprof[i] / 1000.0);
 
     fflush(stdout);
-    ui_text(nt == 0 || !text[0] ? "Didn't hear anything" : text);
+    to = ui_out_lang();
+    if (nt == 0 || !text[0]) {
+        ui_text("Didn't hear anything");
+        return;
+    }
+    if (to == s_w.lang) {   /* same language both sides: nothing to translate */
+        ui_text(text);
+        return;
+    }
+    ui_status("Translating…");
+    ui_heard(text);
+    if (net_translate(text, s_w.lang, to, tr, sizeof(tr)) == 0) {
+        printf("TRN %s\n", tr);
+        ui_text(tr);
+    } else {
+        printf("ERR translate %s\n", tr);
+        snprintf(msg, sizeof(msg), "Not translated (%.120s)", tr);
+        ui_text(msg);
+    }
+    fflush(stdout);
 }
 
 /* -------------------------------------------------------------------- main */
@@ -266,6 +288,7 @@ static void whistle_task(void *arg)
                 n = 0;
                 t_start = esp_timer_get_time();
                 ui_status("Listening…");
+                ui_heard("");
                 ui_text("");
                 printf("EVT recording\n");
                 fflush(stdout);
@@ -332,6 +355,7 @@ void app_main(void)
     worker_start();
     button_init();
     mic_init();
+    net_start();   /* connects while the model loads */
 
     part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, 0x40, "model");
     if (!part) {
@@ -360,12 +384,21 @@ void app_main(void)
                (esp_timer_get_time() - t) / 1000.0);
     }
     printf("EVT ready model=whistle depth=%u enc_layers=%u d_model=%u vocab=%u "
-           "psram_free=%u internal_free=%u\n",
+           "psram_free=%u internal_free=%u internal_largest=%u\n",
            (unsigned)s_w.depth, (unsigned)s_w.enc_layers, (unsigned)s_w.d, (unsigned)s_w.vocab,
            (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
-           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     fflush(stdout);
 
-    /* The decoder keeps a few KB of scratch per call level; give it room. */
-    xTaskCreatePinnedToCore(whistle_task, "whistle", 48 * 1024, NULL, 5, NULL, 0);
+    /* The decoder keeps a few KB of scratch per call level; give it room - in
+     * PSRAM, as Wi-Fi and the screen's DMA bounce buffers (466 x 50 px,
+     * 46.6 KB) need the internal RAM. The task writes no flash, so a PSRAM
+     * stack is safe. */
+    if (xTaskCreatePinnedToCoreWithCaps(whistle_task, "whistle", 48 * 1024, NULL, 5, NULL, 0,
+                                        MALLOC_CAP_SPIRAM) != pdPASS) {
+        printf("ERR whistle_task (no memory for its stack)\n");
+        fflush(stdout);
+        ui_status("Out of memory");
+    }
 }

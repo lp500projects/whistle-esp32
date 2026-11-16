@@ -25,3 +25,16 @@ CONFIG_ESP32S3_INSTRUCTION_CACHE_LINE_32B=y
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 # LVGL (the screen, ui.c) allocates with malloc, as Waveshare's 1.75C examples set it.
 CONFIG_LV_USE_CLIB_MALLOC=y
+# Wi-Fi/lwIP and TLS buffers in PSRAM (net.c): internal RAM is scarce once
+# Wi-Fi is up, and the screen's 46.6 KB DMA bounce buffers and the engine's
+# SRAM scratch (nd_quant.c, nd_model.h) need it.
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+# One small HTTPS request per clip needs no throughput, so trade Wi-Fi speed
+# for internal RAM: Wi-Fi code out of IRAM (+18 KB heap) and 8 static RX
+# buffers, not 16 (+12.8 KB).
+# CONFIG_ESP_WIFI_IRAM_OPT is not set
+# CONFIG_ESP_WIFI_RX_IRAM_OPT is not set
+# CONFIG_ESP_PHY_IRAM_OPT is not set
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=8
+CONFIG_ESP_WIFI_RX_BA_WIN=6

@@ -4,7 +4,8 @@
  *       Spanish     English      tap the arrow to swap them
  *
  *        Hold BOOT and speak     status
- *      Spain is the best.        what was heard
+ *      España es la mejor.       what was heard
+ *      Spain is the best.        its translation
  *
  * Flags are drawn from stripes; English gets a simplified USA flag. */
 #include <stdint.h>
@@ -42,7 +43,7 @@ static const struct {
 };
 
 static volatile int s_lang[2] = { 3, 0 };   /* Spanish > English */
-static lv_obj_t    *s_flag[2], *s_name[2], *s_status, *s_text;
+static lv_obj_t    *s_flag[2], *s_name[2], *s_status, *s_heard, *s_text;
 
 static void rect(lv_obj_t *p, int x, int y, int w, int h, uint32_t c)
 {
@@ -112,7 +113,7 @@ static lv_obj_t *label(lv_obj_t *p, const lv_font_t *font, uint32_t c)
 
 void ui_init(void)
 {
-    lv_obj_t *scr, *arrow;
+    lv_obj_t *scr, *arrow, *col;
     int       side;
 
     bsp_display_start();
@@ -144,15 +145,30 @@ void ui_init(void)
     lv_obj_set_ext_click_area(arrow, 24);
     lv_obj_add_event_cb(arrow, on_swap, LV_EVENT_CLICKED, NULL);
 
-    s_status = label(scr, &font_nunito_22, 0x909090);
-    lv_obj_align(s_status, LV_ALIGN_TOP_MID, 0, 232);
+    /* status, heard, text stacked in a column, so the big text moves up when
+     * nothing was heard. 330 px wide: the circle is ~334 px across at the
+     * third line's depth */
+    col = lv_obj_create(scr);
+    lv_obj_remove_style_all(col);
+    lv_obj_set_scrollable(col, false);
+    lv_obj_set_size(col, 330, LV_SIZE_CONTENT);
+    lv_obj_align(col, LV_ALIGN_TOP_MID, 0, 232);
+    lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(col, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(col, 10, 0);
 
-    /* 330 px wide: the circle is ~334 px across at the third line's depth */
-    s_text = label(scr, &font_nunito_30, 0xFFFFFF);
+    s_status = label(col, &font_nunito_22, 0x909090);
+
+    s_heard = label(col, &font_nunito_22, 0xC0C0C0);
+    lv_obj_set_width(s_heard, 330);
+    lv_label_set_long_mode(s_heard, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(s_heard, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_hidden(s_heard, true);
+
+    s_text = label(col, &font_nunito_30, 0xFFFFFF);
     lv_obj_set_width(s_text, 330);
     lv_label_set_long_mode(s_text, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(s_text, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(s_text, LV_ALIGN_TOP_MID, 0, 272);
     bsp_display_unlock();
 }
 
@@ -163,14 +179,28 @@ void ui_status(const char *s)
     bsp_display_unlock();
 }
 
-void ui_text(const char *s)
+void ui_heard(const char *s)
 {
     bsp_display_lock(-1);
+    lv_label_set_text(s_heard, s);
+    lv_obj_set_hidden(s_heard, !s[0]);
+    bsp_display_unlock();
+}
+
+void ui_text(const char *s)
+{
+    size_t n;
+
+    bsp_display_lock(-1);
     /* three lines of the big font fit inside the circle; past ~60 characters
-     * the small one keeps a whole sentence on screen */
-    lv_obj_set_style_text_font(s_text, strlen(s) > 60 ? &font_nunito_22 : &font_nunito_30, 0);
+     * (counting the heard line above) the small one keeps it all on screen.
+     * shortcut: a very long clip (~8 s) can still run past the bottom; cap
+     * the heard line if that bites */
+    n = strlen(s) + strlen(lv_label_get_text(s_heard));
+    lv_obj_set_style_text_font(s_text, n > 60 ? &font_nunito_22 : &font_nunito_30, 0);
     lv_label_set_text(s_text, s);
     bsp_display_unlock();
 }
 
 int ui_in_lang(void) { return s_lang[0]; }
+int ui_out_lang(void) { return s_lang[1]; }

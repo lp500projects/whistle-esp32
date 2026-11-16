@@ -6,8 +6,12 @@
 #include "esp_heap_caps.h"
 #include "sdkconfig.h"
 /* Decoded rows and the byte table are read once per multiply-add: keep them
- * in internal SRAM, not PSRAM. */
-#define ND_QUANT_ALLOC(n) heap_caps_malloc((n), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+ * in internal SRAM, not PSRAM. shortcut: falls back to PSRAM (slower) when
+ * SRAM has no block that big - with Wi-Fi up it may not, for the stem's
+ * 33 KB tile - rather than return NULL to callers that don't check; reclaim
+ * SRAM if the timing bites. */
+#define ND_QUANT_ALLOC(n) \
+    heap_caps_malloc_prefer((n), 2, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT, MALLOC_CAP_SPIRAM)
 #define ND_QUANT_FREE(p)  heap_caps_free(p)
 #else
 #define ND_QUANT_ALLOC(n) malloc(n)
