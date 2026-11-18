@@ -3,11 +3,13 @@
  *        [flag]  >  [flag]       tap a flag to change its language,
  *       Spanish     English      tap the arrow to swap them
  *
- *        Hold BOOT and speak     status
+ *     Hold the button and speak  status
  *      España es la mejor.       what was heard
- *      Spain is the best.        its translation
+ *      Spain is the best.     ↘  its translation; the arrow points at BOOT
+ *              ( )               voice ring / spinner while busy
  *
  * Flags are drawn from stripes; English gets a simplified USA flag. */
+#include <math.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -26,6 +28,10 @@ LV_FONT_DECLARE(font_nunito_30);   /* so ñ, é, ü, ß, ł, ż all render */
 #define FLAG_Y  140                /* flag centre */
 #define FLAG_DX 100                /* screen centre to flag centre */
 #define SLEEP_MS 10000             /* screen off after this long with no touch or update */
+#define CLEAR_MS 5000              /* the hint and notes clear after this long */
+#define BOOT_DEG 35                /* BOOT's place on the rim, degrees below 3 o'clock */
+#define BOOT_R   205               /* screen centre to arrow centre */
+#define BUSY_Y   395               /* ring / spinner centre, under the text */
 
 /* nd_whistle's language order: en de fr es it nl pl. Stripe weights run
  * along the stripe axis (Spain's yellow band is twice the red ones). */
@@ -45,6 +51,9 @@ static const struct {
 
 static volatile int s_lang[2] = { 3, 0 };   /* Spanish > English */
 static lv_obj_t    *s_flag[2], *s_name[2], *s_status, *s_heard, *s_text;
+static lv_obj_t    *s_ring, *s_spin, *s_arrow;
+static int          s_mode = -1, s_note;   /* -1 while loading: no arrow, no sleep */
+static volatile float s_level;
 
 static void rect(lv_obj_t *p, int x, int y, int w, int h, uint32_t c)
 {
@@ -104,19 +113,75 @@ static void on_swap(lv_event_t *e)
 }
 
 /* Touches reset LVGL's idle time, and so does every ui_status/ui_text, so
- * BOOT and new results wake the screen too. */
-static void on_idle(lv_timer_t *t)
+ * BOOT and new results wake the screen too. Runs in the LVGL task, so it
+ * calls lv_* directly, never ui_*. */
+static void on_tick(lv_timer_t *t)
 {
-    static int asleep;
-    int        idle = lv_display_get_inactive_time(NULL) > SLEEP_MS;
+    static int   asleep, ring;
+    static float shown;
+    uint32_t     quiet = lv_display_get_inactive_time(NULL);
+    int          idle = s_mode == UI_READY && quiet > SLEEP_MS, d;
 
     (void)t;
+    if (s_mode == UI_LISTEN) {
+        shown = fmaxf(s_level, shown * 0.85f);   /* jump up, ease down */
+        d = 24 + (int)(40 * shown);
+        if (d != ring)
+            lv_obj_set_size(s_ring, d, d);
+        ring = d;
+    }
+    if (s_mode == UI_READY && quiet > CLEAR_MS && (lv_label_get_text(s_status)[0] || s_note)) {
+        lv_label_set_text(s_status, "");
+        if (s_note)
+            lv_label_set_text(s_text, "");
+        s_note = 0;
+    }
     if (idle == asleep)
         return;
     asleep = idle;
     bsp_display_brightness_set(idle ? 0 : 100);
     /* while dark, the top layer takes the waking tap so it can't change a flag */
     lv_obj_set_clickable(lv_layer_top(), idle);
+    lv_obj_set_hidden(s_arrow, idle || s_mode != UI_READY);   /* no redraws while dark */
+}
+
+static void nudge(void *arrow, int32_t v)
+{
+    lv_obj_set_style_translate_x(arrow, (int32_t)(v * cosf(BOOT_DEG * (float)M_PI / 180)), 0);
+    lv_obj_set_style_translate_y(arrow, (int32_t)(v * sinf(BOOT_DEG * (float)M_PI / 180)), 0);
+}
+
+/* A 32 px arrow on the rim pointing at BOOT, nudging towards it. */
+static void arrow_create(lv_obj_t *scr)
+{
+    static lv_point_precise_t p[5];   /* tail, tip, one barb, tip, the other */
+    float      c = cosf(BOOT_DEG * (float)M_PI / 180), s = sinf(BOOT_DEG * (float)M_PI / 180);
+    lv_anim_t  a;
+
+    p[0] = (lv_point_precise_t){ 24 - 16 * c, 24 - 16 * s };
+    p[1] = p[3] = (lv_point_precise_t){ 24 + 16 * c, 24 + 16 * s };
+    p[2] = (lv_point_precise_t){ p[1].x - 12 * c + 12 * s, p[1].y - 12 * s - 12 * c };
+    p[4] = (lv_point_precise_t){ p[1].x - 12 * c - 12 * s, p[1].y - 12 * s + 12 * c };
+
+    s_arrow = lv_line_create(scr);
+    lv_line_set_points(s_arrow, p, 5);
+    lv_obj_set_size(s_arrow, 48, 48);
+    lv_obj_set_pos(s_arrow, CX + (int)(BOOT_R * c) - 24, CX + (int)(BOOT_R * s) - 24);
+    lv_obj_set_style_line_width(s_arrow, 5, 0);
+    lv_obj_set_style_line_color(s_arrow, lv_color_white(), 0);
+    lv_obj_set_style_line_rounded(s_arrow, true, 0);
+    lv_obj_set_clickable(s_arrow, false);
+    lv_obj_set_hidden(s_arrow, true);
+
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, s_arrow);
+    lv_anim_set_exec_cb(&a, nudge);
+    lv_anim_set_values(&a, 0, 8);
+    lv_anim_set_duration(&a, 600);
+    lv_anim_set_reverse_duration(&a, 600);
+    lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
+    lv_anim_start(&a);
 }
 
 static lv_obj_t *label(lv_obj_t *p, const lv_font_t *font, uint32_t c)
@@ -132,8 +197,18 @@ void ui_init(void)
 {
     lv_obj_t *scr, *arrow, *col;
     int       side;
+    /* As bsp_display_start(), but LVGL on core 1 next to the nd_worker,
+     * which outranks it: drawn in the worker's gaps, the spinner costs
+     * recognition 2.5%; from core 0 (no affinity) it cost 11%. */
+    bsp_display_cfg_t cfg = {
+        .lv_adapter_cfg  = ESP_LV_ADAPTER_DEFAULT_CONFIG(),
+        .rotation        = ESP_LV_ADAPTER_ROTATE_0,
+        .tear_avoid_mode = ESP_LV_ADAPTER_TEAR_AVOID_MODE_NONE,
+        .touch_flags     = { .swap_xy = 0, .mirror_x = 1, .mirror_y = 1 },
+    };
 
-    bsp_display_start();
+    cfg.lv_adapter_cfg.task_core_id = 1;
+    bsp_display_start_with_config(&cfg);
     bsp_display_backlight_on();
     bsp_display_lock(-1);   /* negative = wait forever; 0 would not wait */
     scr = lv_screen_active();
@@ -187,9 +262,49 @@ void ui_init(void)
     lv_label_set_long_mode(s_text, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(s_text, LV_TEXT_ALIGN_CENTER, 0);
 
-    lv_timer_create(on_idle, 100, NULL);
+    /* Busy indicators sit below the text, not in the column, so the heard
+     * line keeps its place. Small, as each frame redraws their box. */
+    s_ring = lv_obj_create(scr);
+    lv_obj_remove_style_all(s_ring);
+    lv_obj_set_clickable(s_ring, false);
+    lv_obj_set_style_radius(s_ring, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(s_ring, 4, 0);
+    lv_obj_set_style_border_color(s_ring, lv_color_hex(0xE5484D), 0);
+    lv_obj_set_size(s_ring, 24, 24);
+    lv_obj_align(s_ring, LV_ALIGN_CENTER, 0, BUSY_Y - CX);
+    lv_obj_set_hidden(s_ring, true);
+
+    s_spin = lv_spinner_create(scr);
+    lv_obj_set_clickable(s_spin, false);
+    lv_obj_set_size(s_spin, 48, 48);
+    lv_obj_align(s_spin, LV_ALIGN_CENTER, 0, BUSY_Y - CX);
+    lv_obj_set_style_arc_width(s_spin, 5, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(s_spin, 5, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(s_spin, lv_color_hex(0x303030), LV_PART_MAIN);
+    lv_obj_set_style_arc_color(s_spin, lv_color_white(), LV_PART_INDICATOR);
+    lv_obj_set_hidden(s_spin, true);
+
+    arrow_create(scr);
+    lv_timer_create(on_tick, 33, NULL);
     bsp_display_unlock();
 }
+
+void ui_mode(int m)
+{
+    static const char *const STATUS[] = { "Hold the button and speak", "Listening…", "Thinking…" };
+
+    bsp_display_lock(-1);
+    s_mode = m;
+    s_level = 0.0f;
+    lv_label_set_text(s_status, STATUS[m]);
+    lv_obj_set_hidden(s_ring, m != UI_LISTEN);
+    lv_obj_set_hidden(s_spin, m != UI_THINK);
+    lv_obj_set_hidden(s_arrow, m != UI_READY);
+    lv_display_trigger_activity(lv_display_get_default());
+    bsp_display_unlock();
+}
+
+void ui_level(float v) { s_level = v; }
 
 void ui_status(const char *s)
 {
@@ -219,8 +334,15 @@ void ui_text(const char *s)
     n = strlen(s) + strlen(lv_label_get_text(s_heard));
     lv_obj_set_style_text_font(s_text, n > 60 ? &font_nunito_22 : &font_nunito_30, 0);
     lv_label_set_text(s_text, s);
+    s_note = 0;
     lv_display_trigger_activity(lv_display_get_default());
     bsp_display_unlock();
+}
+
+void ui_note(const char *s)
+{
+    ui_text(s);
+    s_note = 1;
 }
 
 int ui_in_lang(void) { return s_lang[0]; }

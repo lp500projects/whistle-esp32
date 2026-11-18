@@ -47,10 +47,12 @@
                                       * the clip peak, so one click would turn
                                       * every word down */
 #define TAIL_DROP_MS   30            /* release transient */
+#define TAIL_KEEP_MS   800           /* recorded past the release: people let go
+                                      * as they finish, and Whistle drops a last
+                                      * syllable with no ~0.3 s pause after it */
 #define FLOOR_WIN      320           /* 20 ms noise-floor windows */
 #define FLOOR_HIST     250           /* 5 s of idle history */
 #define GATE_DB        12.0f         /* speech must clear the floor by this */
-#define READY_MSG      "Hold BOOT and speak"
 
 static const char *const LANGS[] = { "en", "de", "fr", "es", "it", "nl", "pl" };
 
@@ -175,7 +177,7 @@ static void transcribe(float *x, uint32_t n)
         printf("EVT no_speech (nothing %.0f dB above the noise floor)\n", GATE_DB);
         printf("TXT \n");
         fflush(stdout);
-        ui_text("Didn't hear anything");
+        ui_note("Didn't hear anything");
         return;
     }
     x += s0;
@@ -215,7 +217,7 @@ static void transcribe(float *x, uint32_t n)
     fflush(stdout);
     to = ui_out_lang();
     if (nt == 0 || !text[0]) {
-        ui_text("Didn't hear anything");
+        ui_note("Didn't hear anything");
         return;
     }
     if (to == s_w.lang) {   /* same language both sides: nothing to translate */
@@ -242,7 +244,7 @@ static void whistle_task(void *arg)
     const uint32_t cap = SAMPLE_RATE * MAX_SECS;
     float         *clip = (float *)heap_caps_malloc(cap * sizeof(float), MALLOC_CAP_SPIRAM);
     int16_t        raw[CHUNK * 2];         /* two mics, interleaved */
-    uint32_t       n = 0;
+    uint32_t       n = 0, rel = 0, stop = 0;   /* sample counts at release, and to stop at */
     int            recording = 0, stable = 1, last = 1;
     int64_t        changed_at = 0, t_start = 0;
     float          win_e = 0.0f;
@@ -262,17 +264,19 @@ static void whistle_task(void *arg)
         for (k = 0; k < ns && k < cap; k++)
             clip[k] = (float)(int16_t)(st_start[2 * k] | st_start[2 * k + 1] << 8) / 32768.0f;
         printf("EVT selftest clip (main/selftest.raw, in the input language on screen)\n");
+        ui_mode(UI_THINK);   /* so the timings include the spinner's redraws */
         transcribe(clip, k);
         fflush(stdout);
     }
 #endif
     printf("EVT READY - hold BOOT (GPIO%d) and speak\n", BUTTON_GPIO);
     fflush(stdout);
-    ui_status(READY_MSG);
+    ui_mode(UI_READY);
 
     for (;;) {
         size_t i, m = CHUNK;
         int    lvl;
+        float  e = 0.0f;
 
         if (esp_codec_dev_read(s_mic, raw, sizeof(raw)) != ESP_CODEC_DEV_OK)
             continue;
@@ -285,33 +289,18 @@ static void whistle_task(void *arg)
             stable = lvl;
             if (stable == 0) {
                 recording = 1;
-                n = 0;
+                n = stop = 0;
                 t_start = esp_timer_get_time();
-                ui_status("Listening…");
+                ui_mode(UI_LISTEN);
                 ui_heard("");
                 ui_text("");
                 printf("EVT recording\n");
                 fflush(stdout);
             } else if (recording) {
-                uint32_t head = HEAD_DROP_MS * 16, tail = TAIL_DROP_MS * 16;
-                recording = 0;
                 printf("EVT released held_ms=%u\n",
                        (unsigned)((esp_timer_get_time() - t_start) / 1000));
-                if (n > head + tail + 1600) {
-                    /* the button is not read until this returns, so say so */
-                    ui_status("Thinking…");
-                    transcribe(clip + head, n - head - tail);
-                } else {
-                    printf("EVT too_short\nTXT \n");
-                    ui_text("Too short - hold BOOT while you speak");
-                }
-                ui_status(READY_MSG);
-                fflush(stdout);
-                /* Inference stalled the reads; restart the floor estimate on
-                 * fresh audio rather than on whatever piled up in the DMA. */
-                win_e = 0.0f;
-                win_n = 0;
-                continue;
+                rel  = n;
+                stop = n + TAIL_KEEP_MS * 16;   /* transcribed below once recorded */
             }
         }
 
@@ -321,6 +310,7 @@ static void whistle_task(void *arg)
             if (recording) {
                 if (n < cap)
                     clip[n++] = v;
+                e += v * v;
             } else {
                 win_e += v * v;
                 if (++win_n == FLOOR_WIN) {
@@ -333,11 +323,37 @@ static void whistle_task(void *arg)
                 }
             }
         }
-        if (recording == 1 && n >= cap) {
+        /* -70 dBFS (a quiet room's floor here) .. -30 dBFS (speech) -> 0..1.
+         * shortcut: fixed, from one voice test; follow noise_floor() if a
+         * loud room keeps the ring large */
+        if (recording)
+            ui_level(fminf(fmaxf((10.0f * log10f(e / m + 1e-12f) + 70.0f) / 40.0f, 0.0f), 1.0f));
+        if (recording == 1 && !stop && n >= cap) {
             printf("EVT clip_full secs=%d (release to transcribe)\n", MAX_SECS);
             fflush(stdout);
-            ui_status("8 s max - let go of BOOT");
+            ui_status("8 s max - let go of the button");
             recording = 2;
+        }
+        if (stop && (n >= stop || n >= cap)) {
+            uint32_t head = HEAD_DROP_MS * 16, tail = TAIL_DROP_MS * 16;
+            recording = 0;
+            stop = 0;
+            if (rel > head + tail + 1600) {
+                /* silence the release click, which is now mid-clip */
+                memset(clip + rel - tail, 0, tail * sizeof(float));
+                /* the button is not read until this returns, so say so */
+                ui_mode(UI_THINK);
+                transcribe(clip + head, n - head);
+            } else {
+                printf("EVT too_short\nTXT \n");
+                ui_note("Too short - hold the button while you speak");
+            }
+            ui_mode(UI_READY);
+            fflush(stdout);
+            /* Inference stalled the reads; restart the floor estimate on
+             * fresh audio rather than on whatever piled up in the DMA. */
+            win_e = 0.0f;
+            win_n = 0;
         }
     }
 }
